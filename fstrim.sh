@@ -2,8 +2,8 @@
 
 # Script to Setup and Configure TRIM (Discard) Support for External USB SSDs
 # Usage: sudo ./setup-trim-final.sh [options]
-# Author: AmirulAndalib (Revised extensively based on feedback & best practices)
-# Version: 3.0 (Production Candidate)
+# Author: AmirulAndalib
+# Version: 3.1 (Production Release)
 # Last Updated: 2025-04-06
 
 # --- Configuration ---
@@ -59,7 +59,7 @@ log() {
     # Log to file if specified
     if [ -n "$LOG_FILE" ]; then
         # Ensure file logging happens regardless of verbosity for selected levels
-        if [[ "$level" != "TRACE" || "$VERBOSE" -gt 1 ]]; then # Log TRACE only if super verbose maybe? For now, just verbose.
+        if [[ "$level" != "TRACE" || "$VERBOSE" -gt 1 ]]; then # Log TRACE only if super verbose
              echo "$log_prefix $message" >> "$LOG_FILE"
         fi
     fi
@@ -93,7 +93,7 @@ log() {
 
 # --- Help Function ---
 show_help() {
-    echo -e "${BOLD}External SSD TRIM Configuration Tool (v3.0)${RESET}"
+    echo -e "${BOLD}External SSD TRIM Configuration Tool (v3.1)${RESET}"
     echo
     echo "Usage: sudo $0 [options]"
     echo
@@ -134,23 +134,29 @@ check_root() {
 install_packages() {
     local required_cmds=("sg_vpd" "sg_readcap" "lsscsi" "lsusb" "hdparm" "lsblk" "fstrim" "udevadm" "systemctl")
     local missing_cmds=()
-    local cmd_to_pkg=()
-    # Create associative array mapping command to typical package name
-    declare -A cmd_to_pkg=(
-        [sg_vpd]="sg3-utils" [sg_readcap]="sg3-utils" [lsscsi]="lsscsi"
-        [lsusb]="usbutils" [hdparm]="hdparm" [lsblk]="util-linux"
-        [fstrim]="util-linux" [udevadm]="systemd" [systemctl]="systemd" # systemd/util-linux usually core packages
-    )
+    
+    # Declare and initialize the associative array properly
+    declare -A pkg_map
+    pkg_map["sg_vpd"]="sg3-utils"
+    pkg_map["sg_readcap"]="sg3-utils"
+    pkg_map["lsscsi"]="lsscsi"
+    pkg_map["lsusb"]="usbutils" 
+    pkg_map["hdparm"]="hdparm"
+    pkg_map["lsblk"]="util-linux"
+    pkg_map["fstrim"]="util-linux"
+    pkg_map["udevadm"]="systemd"
+    pkg_map["systemctl"]="systemd"
+    
     # Adjust for alternative names (e.g., dnf/yum)
     if command -v dnf &> /dev/null || command -v yum &> /dev/null; then
-        cmd_to_pkg[sg_vpd]="sg3_utils"
-        cmd_to_pkg[sg_readcap]="sg3_utils"
+        pkg_map["sg_vpd"]="sg3_utils"
+        pkg_map["sg_readcap"]="sg3_utils"
     fi
 
     log "INFO" "Checking for required commands..."
     for cmd in "${required_cmds[@]}"; do
         if ! command -v "$cmd" &> /dev/null; then
-            log "WARNING" "Required command not found: $cmd (Package: ${cmd_to_pkg[$cmd]})"
+            log "WARNING" "Required command not found: $cmd (Package: ${pkg_map[$cmd]})"
             missing_cmds+=("$cmd")
         else
              log "TRACE" "Command '$cmd' found."
@@ -166,25 +172,25 @@ install_packages() {
 
     # Identify unique packages to install
     local packages_to_install=()
-     for cmd in "${missing_cmds[@]}"; do
-         pkg=${cmd_to_pkg[$cmd]}
-         # Avoid adding core packages like systemd/util-linux unless essential command missing
-         if [[ "$pkg" == "systemd" || "$pkg" == "util-linux" ]]; then
-              log "ERROR" "Core command '$cmd' from package '$pkg' is missing. This indicates a broken base system. Cannot proceed."
-              exit $E_PKG_MISSING
-         fi
-         # Add package if not already in the list
-         if [[ -n "$pkg" && ! " ${packages_to_install[@]} " =~ " $pkg " ]]; then
-             packages_to_install+=("$pkg")
-         fi
-     done
+    for cmd in "${missing_cmds[@]}"; do
+        pkg=${pkg_map[$cmd]}
+        # Avoid adding core packages like systemd/util-linux unless essential command missing
+        if [[ "$pkg" == "systemd" || "$pkg" == "util-linux" ]]; then
+            log "ERROR" "Core command '$cmd' from package '$pkg' is missing. This indicates a broken base system. Cannot proceed."
+            exit $E_PKG_MISSING
+        fi
+        # Add package if not already in the list
+        if [[ -n "$pkg" && ! " ${packages_to_install[@]} " =~ " $pkg " ]]; then
+            packages_to_install+=("$pkg")
+        fi
+    done
 
     if [ ${#packages_to_install[@]} -eq 0 ]; then
-         log "INFO" "No installable packages identified for missing commands (likely core components)."
-         # If only core components were missing, we would have exited above.
-         # This path might be hit if mapping is incomplete. Assume user needs to fix manually.
-         log "ERROR" "Cannot resolve missing commands automatically. Please install manually."
-         exit $E_PKG_MISSING
+        log "INFO" "No installable packages identified for missing commands (likely core components)."
+        # If only core components were missing, we would have exited above.
+        # This path might be hit if mapping is incomplete. Assume user needs to fix manually.
+        log "ERROR" "Cannot resolve missing commands automatically. Please install manually."
+        exit $E_PKG_MISSING
     fi
 
     log "INFO" "Required packages to install: ${packages_to_install[*]}"
@@ -216,35 +222,35 @@ install_packages() {
     # Update package lists if needed
     if [ -n "$update_cmd" ]; then
         log "INFO" "Updating package lists..."
-        if $update_cmd &> "$LOG_FILE.install_update.log"; then
+        if $update_cmd &> /tmp/trim_package_update.log; then
              log "DEBUG" "Package list update successful."
         else
-             log "WARNING" "Package list update failed (exit code $?). Check $LOG_FILE.install_update.log. Continuing install attempt..."
+             log "WARNING" "Package list update failed (exit code $?). Check /tmp/trim_package_update.log. Continuing install attempt..."
         fi
     fi
 
     # Install packages
     log "INFO" "Installing packages: ${packages_to_install[*]}"
-    if $install_cmd "${packages_to_install[@]}" &> "$LOG_FILE.install_packages.log"; then
+    if $install_cmd "${packages_to_install[@]}" &> /tmp/trim_package_install.log; then
          log "SUCCESS" "Packages installed successfully."
     else
-         log "ERROR" "Failed to install packages (exit code $?). Check $LOG_FILE.install_packages.log."
+         log "ERROR" "Failed to install packages (exit code $?). Check /tmp/trim_package_install.log."
          log "ERROR" "Please install manually: ${packages_to_install[*]}"
          exit $E_PKG_INSTALL
     fi
 
     # Verify commands again after installation
     for cmd in "${missing_cmds[@]}"; do
-         pkg=${cmd_to_pkg[$cmd]}
-          # Skip verification for core packages handled earlier
-         if [[ "$pkg" == "systemd" || "$pkg" == "util-linux" ]]; then continue; fi
+        pkg=${pkg_map[$cmd]}
+        # Skip verification for core packages handled earlier
+        if [[ "$pkg" == "systemd" || "$pkg" == "util-linux" ]]; then continue; fi
 
-         if ! command -v "$cmd" &> /dev/null; then
-              log "ERROR" "Command '$cmd' still not found after attempting installation of package '$pkg'."
-              exit $E_PKG_INSTALL
-         fi
-     done
-     log "INFO" "Command verification after install successful."
+        if ! command -v "$cmd" &> /dev/null; then
+            log "ERROR" "Command '$cmd' still not found after attempting installation of package '$pkg'."
+            exit $E_PKG_INSTALL
+        fi
+    done
+    log "INFO" "Command verification after install successful."
 }
 
 
@@ -281,7 +287,7 @@ get_usb_ids() {
          log "TRACE" "udevadm info command failed for $base_dev_path (Exit code $?)"
     fi
 
-     # Method 2: sysfs path traversal (More fragile)
+    # Method 2: sysfs path traversal
     local dev_name=${dev_path##*/}
     dev_name=${dev_name%%[0-9]*} # Use base device name
     local sys_dev_link="/sys/class/block/$dev_name"
@@ -318,7 +324,7 @@ get_usb_ids() {
          log "TRACE" "Could not resolve sysfs link $sys_dev_link"
     fi
 
-    # Method 3: lsusb and lsscsi matching (Least reliable)
+    # Method 3: lsusb and lsscsi matching
     log "TRACE" "Trying lsusb/lsscsi matching for $dev_name"
     local scsi_info model vendor
     if scsi_info=$(lsscsi | grep "$dev_name" | head -n 1); then
@@ -377,7 +383,8 @@ select_usb_device() {
     echo -e "\n${BOLD}Available USB Block Devices:${RESET}"
     echo "---------------------------------"
     printf "%-4s %-15s %-10s %-15s %-s\n" "Num" "Device" "Size" "Vendor" "Model"
-    echo "---------------------------------"
+    echo
+
     for i in "${!devices_found[@]}"; do
         devname=$(echo "${device_lines[$i]}" | awk '{print $1}')
         size=$(echo "${device_lines[$i]}" | awk '{print $2}')
@@ -385,7 +392,8 @@ select_usb_device() {
         model=$(echo "${device_lines[$i]}" | awk '{print $4}')
         printf "%-4s %-15s %-10s %-15s %-s\n" "$((i+1))." "$devname" "$size" "$vendor" "$model"
     done
-    echo "---------------------------------"
+
+    echo
 
     local selection
     while true; do
@@ -558,39 +566,179 @@ calculate_discard_max() {
     log "INFO" "Calculated discard_max_bytes: $DEVICE_DISCARD_MAX_BYTES"
 }
 
+# Find the proper scsi_disk provisioning_mode path 
+find_provisioning_path() {
+    local device_name=$1
+    local paths=()
+    
+    # First try the typical paths with wildcards
+    paths+=("/sys/block/$device_name/device/scsi_disk/*/provisioning_mode")
+    paths+=("/sys/class/scsi_disk/*/device/provisioning_mode")
+    
+    # Try with lsscsi to get the SCSI host:channel:target:lun info
+    if command -v lsscsi &> /dev/null; then
+        local lsscsi_output
+        lsscsi_output=$(lsscsi -d | grep "$device_name" 2>/dev/null)
+        if [ -n "$lsscsi_output" ]; then
+            local scsi_info
+            scsi_info=$(echo "$lsscsi_output" | grep -o "\[[0-9]*:[0-9]*:[0-9]*:[0-9]*\]" | head -1 | tr -d '[]')
+            if [ -n "$scsi_info" ]; then
+                paths+=("/sys/class/scsi_disk/$scsi_info/provisioning_mode")
+            fi
+        fi
+    fi
+    
+    # Use find as a fallback
+    local find_paths
+    find_paths=$(find /sys -name "provisioning_mode" -type f 2>/dev/null | grep -v "bsg")
+    if [ -n "$find_paths" ]; then
+        while IFS= read -r path; do
+            paths+=("$path")
+        done <<< "$find_paths"
+    fi
+    
+    # Check each path in order
+    for path_pattern in "${paths[@]}"; do
+        for expanded_path in $(eval echo "$path_pattern" 2>/dev/null || echo ""); do
+            if [ -f "$expanded_path" ] && [ -w "$expanded_path" ]; then
+                # Try to read existing value
+                if cat "$expanded_path" &> /dev/null; then
+                    echo "$expanded_path"
+                    return 0
+                fi
+            fi
+        done
+    done
+    
+    # Not found
+    echo ""
+    return 1
+}
+
 # Sets runtime values (best effort) and creates persistent udev rule
 configure_trim() {
     log "INFO" "Applying TRIM configuration for $DEVICE..."
     local device_name=${DEVICE##*/} # e.g., sda, sdb (no partition)
     device_name=${device_name%%[0-9]*} # Ensure it's the base device name
     local discard_max=$DEVICE_DISCARD_MAX_BYTES
-
-    # 1. Set runtime values (best effort for immediate effect/testing - udev rule is primary)
-    # Note: These might fail if permissions are strict or paths don't exist yet.
-    log "INFO" "Attempting to set runtime values (best effort)..."
-    local prov_path="/sys/block/$device_name/device/scsi_disk/"*"/provisioning_mode" # Globbing
+    
+    # Find the proper provisioning_mode path using our helper function
+    local found_prov_path
+    found_prov_path=$(find_provisioning_path "$device_name")
+    
+    # 1. Set runtime values (best effort for immediate effect/testing)
+    log "INFO" "Setting current runtime values..."
+    
+    # Set provisioning_mode if found
+    if [ -n "$found_prov_path" ]; then
+        log "DEBUG" "Found provisioning_mode path: $found_prov_path"
+        # Read existing mode
+        local current_mode
+        current_mode=$(cat "$found_prov_path" 2>/dev/null || echo "unknown")
+        log "DEBUG" "Current provisioning_mode: $current_mode"
+        
+        # Set to unmap if not already
+        if [ "$current_mode" != "unmap" ]; then
+            log "DEBUG" "Setting provisioning_mode to 'unmap'"
+            if echo "unmap" > "$found_prov_path" 2>/dev/null; then
+                log "SUCCESS" "Successfully set provisioning_mode to 'unmap'"
+            else
+                log "WARNING" "Failed to write 'unmap' to $found_prov_path"
+            fi
+        else
+            log "DEBUG" "provisioning_mode already set to 'unmap'"
+        fi
+    else
+        log "WARNING" "Could not find writable provisioning_mode path for $device_name"
+    fi
+    
+    # Set discard_max_bytes
     local discard_path="/sys/block/$device_name/queue/discard_max_bytes"
+    if [ -f "$discard_path" ] && [ -w "$discard_path" ]; then
+        log "DEBUG" "Setting $discard_path to $discard_max"
+        if echo "$discard_max" > "$discard_path" 2>/dev/null; then
+            log "SUCCESS" "Successfully set discard_max_bytes to $discard_max"
+        else
+            log "WARNING" "Failed to write $discard_max to $discard_path"
+        fi
+    else
+        log "WARNING" "discard_max_bytes path not found or not writable: $discard_path"
+    fi
+    
+    # 2. Create persist script in /etc/rc.local (for non-udev systems or as a backup)
+    log "INFO" "Creating persistence script in /etc/rc.local..."
+    
+    # Create backup of rc.local if it exists
+    if [ -f "/etc/rc.local" ]; then
+        cp /etc/rc.local /etc/rc.local.bak.$(date +%Y%m%d%H%M%S) 2>/dev/null
+    fi
+    
+    # Check if rc.local exists and is executable
+    if [ ! -f "/etc/rc.local" ] || [ ! -x "/etc/rc.local" ]; then
+        # Create a new rc.local file with proper shebang and permissions
+        cat > "/etc/rc.local" << EOF
+#!/bin/sh
+# rc.local - Script executed at the end of each multiuser runlevel
+# 
+# This script is executed at the end of each multiuser runlevel.
+# Make sure that the script will exit 0 on success or any other
+# value on error.
 
-    local found_prov_path=""
-    for p in $prov_path; do
-        if [ -f "$p" ]; then
-            found_prov_path="$p"
-            log "DEBUG" "Found provisioning_mode path for runtime setting: $found_prov_path"
-            log "TRACE" "Setting $found_prov_path to 'unmap'"
-            echo "unmap" > "$found_prov_path" || log "WARNING" "Failed to write 'unmap' to $found_prov_path"
-            break # Use the first one found
+# TRIM configuration for $DEVICE added by setup-trim-final.sh
+EOF
+        chmod +x "/etc/rc.local"
+    fi
+    
+    # Add our TRIM configuration commands if not already present
+    if ! grep -q "# TRIM configuration for $DEVICE" /etc/rc.local; then
+        # Add before exit 0 if it exists
+        if grep -q "^exit 0" /etc/rc.local; then
+            sed -i "/^exit 0/i\\
+# TRIM configuration for $DEVICE added by setup-trim-final.sh\\
+if [ -b \"$DEVICE\" ]; then\\
+    echo \"Setting up TRIM for $DEVICE...\"\\
+    # Set provisioning_mode to unmap for all potential paths\\
+    for path in /sys/block/${device_name}/device/scsi_disk/*/provisioning_mode /sys/class/scsi_disk/*/provisioning_mode /sys/devices/*/scsi_disk/*/provisioning_mode; do\\
+        if [ -f \"\$path\" ] && [ -w \"\$path\" ]; then\\
+            echo unmap > \"\$path\" 2>/dev/null && echo \"  Set \$path to unmap\"\\
+        fi\\
+    done\\
+\\
+    # Set discard_max_bytes\\
+    if [ -f \"/sys/block/${device_name}/queue/discard_max_bytes\" ] && [ -w \"/sys/block/${device_name}/queue/discard_max_bytes\" ]; then\\
+        echo $discard_max > \"/sys/block/${device_name}/queue/discard_max_bytes\" 2>/dev/null && echo \"  Set discard_max_bytes to $discard_max\"\\
+    fi\\
+fi\\
+" /etc/rc.local
+        else
+            # If exit 0 doesn't exist, append at the end
+            cat >> "/etc/rc.local" << EOF
+
+# TRIM configuration for $DEVICE added by setup-trim-final.sh
+if [ -b "$DEVICE" ]; then
+    echo "Setting up TRIM for $DEVICE..."
+    # Set provisioning_mode to unmap for all potential paths
+    for path in /sys/block/${device_name}/device/scsi_disk/*/provisioning_mode /sys/class/scsi_disk/*/provisioning_mode /sys/devices/*/scsi_disk/*/provisioning_mode; do
+        if [ -f "\$path" ] && [ -w "\$path" ]; then
+            echo unmap > "\$path" 2>/dev/null && echo "  Set \$path to unmap"
         fi
     done
-    if [ -z "$found_prov_path" ]; then log "WARNING" "Could not find runtime provisioning_mode path."; fi
 
-    if [ -f "$discard_path" ]; then
-         log "TRACE" "Setting $discard_path to '$discard_max'"
-         echo "$discard_max" > "$discard_path" || log "WARNING" "Failed to write '$discard_max' to $discard_path"
-    else
-        log "WARNING" "Runtime discard_max_bytes path not found: $discard_path"
+    # Set discard_max_bytes
+    if [ -f "/sys/block/${device_name}/queue/discard_max_bytes" ] && [ -w "/sys/block/${device_name}/queue/discard_max_bytes" ]; then
+        echo $discard_max > "/sys/block/${device_name}/queue/discard_max_bytes" 2>/dev/null && echo "  Set discard_max_bytes to $discard_max"
     fi
+fi
 
-    # 2. Create persistent udev rule
+exit 0
+EOF
+        fi
+        log "SUCCESS" "Added TRIM configuration to /etc/rc.local"
+    else
+        log "INFO" "TRIM configuration already exists in /etc/rc.local"
+    fi
+    
+    # 3. Create persistent udev rule
     log "INFO" "Creating persistent udev rule..."
 
     # Ensure udev directory exists
@@ -612,39 +760,25 @@ configure_trim() {
         rule_file="$UDEV_RULE_DIR/10-usb-ssd-trim-${vendor_id}-${product_id}.rules"
         log "INFO" "Creating USB ID specific udev rule: $rule_file"
 
-        # Use ENV variables populated by udev based on device discovery
-        # KERNEL=="sd*[!0-9]" matches whole block devices (sda, sdb, not sda1)
-        # SUBSYSTEM=="block" for discard_max_bytes attribute
-        # SUBSYSTEM=="scsi_disk" for provisioning_mode attribute
+        # Following Jeff Geerling's guide - simpler approach for better compatibility
         rule_content=$(cat << EOF
-# Udev rule generated by setup-trim-final.sh for USB SSD ${vendor_id}:${product_id}
-# Target Device Hint (at generation time): $DEVICE
-# Rule 1: Set discard_max_bytes on the block device matching the USB ID
-ACTION=="add|change", SUBSYSTEM=="block", KERNEL=="sd*[!0-9]", ENV{ID_VENDOR_ID}=="$vendor_id", ENV{ID_MODEL_ID}=="$product_id", ATTR{queue/discard_max_bytes}="$discard_max"
+# Udev rule for USB SSD ${vendor_id}:${product_id} - TRIM support
+# Created by setup-trim-final.sh for device $DEVICE
 
-# Rule 2: Set provisioning_mode on the underlying scsi_disk device matching the USB ID
-ACTION=="add|change", SUBSYSTEM=="scsi_disk", ENV{ID_VENDOR_ID}=="$vendor_id", ENV{ID_MODEL_ID}=="$product_id", ATTR{provisioning_mode}="unmap"
+ACTION=="add|change", ATTRS{idVendor}=="$vendor_id", ATTRS{idProduct}=="$product_id", SUBSYSTEM=="scsi_disk", ATTR{provisioning_mode}="unmap"
 EOF
 )
     else
-        # Fallback to generic rule based on kernel name (less reliable)
+        # Fallback to generic rule based on kernel name
         log "WARNING" "USB Vendor/Product ID unavailable. Creating generic udev rule based on kernel name ($device_name)."
-        log "WARNING" "This generic rule (${BOLD}$device_name${RESET}) might unintentionally affect other devices if kernel names change or are reused."
         rule_file="$UDEV_RULE_DIR/11-generic-ssd-trim-${device_name}.rules"
         log "INFO" "Creating generic udev rule: $rule_file"
 
-        # This rule matches only the specific kernel name (e.g., sda)
-        # Setting provisioning_mode via RUN+ is less ideal but necessary without IDs
-        # ATTR{...} is preferred when possible.
         rule_content=$(cat << EOF
-# Generic Udev rule generated by setup-trim-final.sh for device $device_name
+# Generic Udev rule for TRIM support - device $device_name
 # WARNING: This rule is based on kernel name and might affect other devices if names change.
-# Rule 1: Set discard_max_bytes on the block device
+ACTION=="add|change", SUBSYSTEM=="block", KERNEL=="$device_name", RUN+="/bin/sh -c 'for p in /sys/block/$device_name/device/scsi_disk/*/provisioning_mode; do [ -f \"\$p\" ] && [ -w \"\$p\" ] && echo unmap > \"\$p\"; done'"
 ACTION=="add|change", SUBSYSTEM=="block", KERNEL=="$device_name", ATTR{queue/discard_max_bytes}="$discard_max"
-
-# Rule 2: Attempt to set provisioning_mode using RUN command (best effort for generic rule)
-# Tries to find the correct path under /sys/block/%k/device/scsi_disk/*/provisioning_mode
-ACTION=="add|change", SUBSYSTEM=="block", KERNEL=="$device_name", RUN+="/bin/sh -c 'for p in /sys/block/%k/device/scsi_disk/*/provisioning_mode; do [ -f \"\$p\" ] && echo unmap > \"\$p\"; done'"
 EOF
 )
     fi
@@ -662,14 +796,112 @@ EOF
     # Reload udev rules
     log "INFO" "Reloading udev rules (udevadm control --reload-rules)..."
     if udevadm control --reload-rules; then
-        log "DEBUG" "udevadm control --reload-rules completed successfully."
+        log "DEBUG" "udevadm rules reload successful."
     else
-        log "WARNING" "Failed to reload udev rules (Exit code $?). Rules will likely only apply after reboot or replug."
-        # Don't exit, as the rule file might still be valid.
+        log "WARNING" "Failed to reload udev rules. Changes will apply after reboot."
     fi
-    log "INFO" "Udev rule created/updated. Reboot is recommended for reliable application."
-}
+    
+    # 4. Also set discard_max_bytes via a separate udev rule if USB ID is known
+    if [[ "$SELECTED_USB" != "unknown" ]]; then
+        local discard_rule_file="$UDEV_RULE_DIR/10-usb-ssd-discard-${vendor_id}-${product_id}.rules"
+        log "INFO" "Creating separate discard rule for USB ID: $discard_rule_file"
+        
+        local discard_rule_content=$(cat << EOF
+# Udev rule for USB SSD ${vendor_id}:${product_id} - discard_max_bytes
+# Created by setup-trim-final.sh for device $DEVICE
 
+ACTION=="add|change", ATTRS{idVendor}=="$vendor_id", ATTRS{idProduct}=="$product_id", SUBSYSTEM=="block", KERNEL=="sd*[!0-9]", ATTR{queue/discard_max_bytes}="$discard_max"
+EOF
+)
+        if echo -e "$discard_rule_content" > "$discard_rule_file"; then
+            log "SUCCESS" "Created discard_max_bytes rule: $discard_rule_file"
+        else
+            log "WARNING" "Failed to create discard_max_bytes rule file"
+        fi
+    fi
+    
+    # 5. Create init.d script as another fallback for persistence (widely compatible)
+    log "INFO" "Creating init.d script for TRIM persistence..."
+    local init_file="/etc/init.d/trim-setup"
+    
+    cat > "$init_file" << EOF
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          trim-setup
+# Required-Start:    \$local_fs
+# Required-Stop:     
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Configure TRIM for USB SSD
+# Description:       Sets provisioning_mode=unmap and discard_max_bytes for USB SSDs
+### END INIT INFO
+
+# Created by setup-trim-final.sh for device $DEVICE
+
+case "\$1" in
+  start)
+    echo "Setting up TRIM for $DEVICE..."
+    if [ -b "$DEVICE" ]; then
+        # Set provisioning_mode to unmap for all potential paths
+        for path in /sys/block/${device_name}/device/scsi_disk/*/provisioning_mode /sys/class/scsi_disk/*/provisioning_mode /sys/devices/*/scsi_disk/*/provisioning_mode; do
+            if [ -f "\$path" ] && [ -w "\$path" ]; then
+                echo unmap > "\$path" 2>/dev/null && echo "  Set \$path to unmap"
+            fi
+        done
+
+        # Set discard_max_bytes
+        if [ -f "/sys/block/${device_name}/queue/discard_max_bytes" ] && [ -w "/sys/block/${device_name}/queue/discard_max_bytes" ]; then
+            echo $discard_max > "/sys/block/${device_name}/queue/discard_max_bytes" 2>/dev/null && echo "  Set discard_max_bytes to $discard_max"
+        fi
+    else
+        echo "Warning: Device $DEVICE not found"
+    fi
+    ;;
+  stop|restart|force-reload)
+    # No action required
+    ;;
+  status)
+    if [ -b "$DEVICE" ]; then
+        echo "TRIM status for $DEVICE:"
+        # Check provisioning_mode
+        for path in /sys/block/${device_name}/device/scsi_disk/*/provisioning_mode /sys/class/scsi_disk/*/provisioning_mode /sys/devices/*/scsi_disk/*/provisioning_mode; do
+            if [ -f "\$path" ]; then
+                echo "  \$path: \$(cat \$path 2>/dev/null || echo 'unreadable')"
+            fi
+        done
+        
+        # Check discard_max_bytes
+        if [ -f "/sys/block/${device_name}/queue/discard_max_bytes" ]; then
+            echo "  discard_max_bytes: \$(cat /sys/block/${device_name}/queue/discard_max_bytes 2>/dev/null || echo 'unreadable')"
+        fi
+    else
+        echo "Warning: Device $DEVICE not found"
+    fi
+    ;;
+  *)
+    echo "Usage: \$0 {start|status}"
+    exit 1
+    ;;
+esac
+
+exit 0
+EOF
+
+    chmod +x "$init_file"
+    
+    # Enable the script to run at startup if possible
+    if command -v update-rc.d &> /dev/null; then
+        update-rc.d trim-setup defaults &> /dev/null
+        log "SUCCESS" "Created and enabled init.d script: $init_file"
+    elif command -v chkconfig &> /dev/null; then
+        chkconfig --add trim-setup &> /dev/null
+        log "SUCCESS" "Created and enabled init.d script: $init_file"
+    else
+        log "WARNING" "Created init.d script but could not automatically enable it: $init_file"
+    fi
+    
+    log "INFO" "Multiple persistence mechanisms created. Reboot recommended for changes to take effect."
+}
 
 # Configures the systemd fstrim timer using override files
 configure_trim_timer() {
@@ -784,9 +1016,7 @@ test_trim() {
          log "INFO" "Found related mounted filesystem at $test_mount_point. Testing TRIM there."
     else
          log "INFO" "Device $DEVICE (or its partitions) does not appear to be mounted."
-         log "INFO" "Cannot perform specific fstrim test. Test manually after mounting:"
-         log "INFO" "  sudo mount $DEVICE /mnt/my_ssd"
-         log "INFO" "  sudo fstrim -v /mnt/my_ssd"
+         log "INFO" "Cannot perform specific fstrim test. Test manually after mounting."
          return 0 # Not an error, just can't test directly
     fi
 
@@ -806,14 +1036,33 @@ test_trim() {
             log "ERROR" "fstrim test FAILED on $test_mount_point: The discard operation is not supported."
             log "ERROR" "Possible Reasons:"
             log "ERROR" "  1. Filesystem Type: The filesystem on $test_mount_point (check with 'lsblk -f $DEVICE') does not support TRIM."
-            log "ERROR" "  2. Mount Options: The filesystem was not mounted with the 'discard' option (if required by FS type or for continuous TRIM)."
+            log "ERROR" "  2. Mount Options: The filesystem was not mounted with the 'discard' option."
             log "ERROR" "  3. Device/Adapter Issue: TRIM commands are still not passing through correctly despite earlier checks/rules (reboot might be needed)."
-            log "INFO" "Periodic TRIM via fstrim.timer (recommended) does NOT require the 'discard' mount option."
-            log "INFO" "If the timer is enabled, it should work after a reboot if the device truly supports TRIM."
+            
+            # Try to remount the filesystem with discard option
+            log "INFO" "Attempting to remount with discard option..."
+            local current_fs=$(lsblk -no FSTYPE "/dev/$base_device_name" 2>/dev/null | head -n 1)
+            if [ -n "$current_fs" ]; then
+                if mount -o remount,discard "$test_mount_point" 2>/dev/null; then
+                    log "INFO" "Remounted $test_mount_point with discard option. Trying fstrim again..."
+                    fstrim_output=$(fstrim -v "$test_mount_point" 2>&1)
+                    fstrim_status=$?
+                    if [ $fstrim_status -eq 0 ]; then
+                        log "SUCCESS" "fstrim test successful after remount with discard option."
+                        log "INFO" "Output: $fstrim_output"
+                        log "INFO" "To make this permanent, edit /etc/fstab and add 'discard' to the mount options."
+                        return 0
+                    else
+                        log "ERROR" "fstrim still failed after remount. Reboot may be required."
+                    fi
+                else
+                    log "WARNING" "Failed to remount with discard option."
+                fi
+            fi
         else
             log "ERROR" "fstrim test FAILED on $test_mount_point (Exit code: $fstrim_status)."
             log "ERROR" "Output: $fstrim_output"
-            log "ERROR" "Check filesystem integrity, mount status, and system logs ('dmesg', 'journalctl')."
+            log "ERROR" "Check filesystem integrity, mount status, and system logs."
         fi
         return 1 # Indicate test failure
     fi
@@ -888,12 +1137,10 @@ if [ -n "$LOG_FILE" ]; then
         echo "ERROR: Failed to create/touch log file '$LOG_FILE'. Check permissions." >&2
         exit $E_LOG_FILE
     fi
-    # Use tee to log stdout/stderr to file *and* console if verbose
-    # exec > >(tee -a "$LOG_FILE") 2> >(tee -a "$LOG_FILE" >&2) # This can be complex; manual logging preferred.
-    log "INFO" "--- Trim Setup Script v3.0 Started ---"
+    log "INFO" "--- Trim Setup Script v3.1 Started ---"
     log "INFO" "Logging enabled to file: $LOG_FILE"
 else
-    log "INFO" "--- Trim Setup Script v3.0 Started (Logging to console only) ---"
+    log "INFO" "--- Trim Setup Script v3.1 Started (Logging to console only) ---"
 fi
 log "DEBUG" "Initial Config: DEVICE='$DEVICE', SCHEDULE='$TIMER_SCHEDULE', AUTO_INSTALL=$AUTO_INSTALL, ENABLE_TIMER=$ENABLE_TIMER, SELECT_USB=$_SELECT_USB, VERBOSE=$VERBOSE"
 
@@ -932,31 +1179,41 @@ test_trim                # Attempts fstrim test if device is mounted
 echo
 echo -e "${BOLD}${GREEN}--- TRIM Configuration Summary ---${RESET}"
 echo -e "${GRAY}==============================================${RESET}"
-echo -e " Target Device:         ${BOLD}$DEVICE${RESET}"
-echo -e " USB Vendor:Product ID: ${BOLD}${SELECTED_USB}${RESET}"
+echo -e "Target Device:         ${BOLD}$DEVICE${RESET}"
+echo -e "USB Vendor:Product ID: ${BOLD}${SELECTED_USB}${RESET}"
 
 # Report TRIM Support Check Result
 if [[ "$DEVICE_TRIM_SUPPORTED" -eq 1 ]]; then
-    echo -e " Firmware TRIM Support: ${GREEN}Detected${RESET} (Max LBA Count: $DEVICE_MAX_UNMAP_LBA_COUNT)"
+    echo -e "Firmware TRIM Support: ${GREEN}Detected${RESET} (Max LBA Count: $DEVICE_MAX_UNMAP_LBA_COUNT)"
 else
     # Check if user decided to continue despite lack of support
-    if grep -q "User chose to continue despite lack of detected TRIM support" <<< "$(log INFO '')"; then # Hacky way to check log history? Better to use a flag. Let's assume if SUPPORTED=0 we should mention it.
-        echo -e " Firmware TRIM Support: ${RED}Not Detected (or check failed)${RESET} - ${YELLOW}Proceeded at user request.${RESET}"
+    if [[ -n "$continue_anyway" && "$continue_anyway" =~ ^[Yy]$ ]]; then
+        echo -e "Firmware TRIM Support: ${RED}Not Detected${RESET} - ${YELLOW}Proceeded at user request.${RESET}"
     else
-         echo -e " Firmware TRIM Support: ${RED}Not Detected (or check failed)${RESET}"
+         echo -e "Firmware TRIM Support: ${RED}Not Detected${RESET}"
     fi
 fi
-echo -e " Calculated discard_max: ${BOLD}${DEVICE_DISCARD_MAX_BYTES}${RESET} bytes"
+echo -e "Calculated discard_max: ${BOLD}${DEVICE_DISCARD_MAX_BYTES}${RESET} bytes"
 
 # Report udev Rule Status
-if grep -q "Created udev rule:" <<< "$(log SUCCESS '')"; then # Check log if rule creation was successful
+if [[ -f "$UDEV_RULE_DIR/10-usb-ssd-trim-${vendor_id}-${product_id}.rules" || \
+      -f "$UDEV_RULE_DIR/11-generic-ssd-trim-${device_name}.rules" ]]; then
      if [[ "$SELECTED_USB" != "unknown" ]]; then
-         echo -e " Persistent udev Rule:  ${GREEN}Created (USB ID Specific)${RESET}"
+         echo -e "Persistent udev Rule:  ${GREEN}Created (USB ID Specific)${RESET}"
      else
-         echo -e " Persistent udev Rule:  ${YELLOW}Created (Generic - by kernel name $device_name)${RESET}"
+         echo -e "Persistent udev Rule:  ${YELLOW}Created (Generic - by kernel name $device_name)${RESET}"
      fi
 else
-     echo -e " Persistent udev Rule:  ${RED}Failed to create${RESET} (See logs)"
+     echo -e "Persistent udev Rule:  ${RED}Failed to create${RESET} (See logs)"
+fi
+
+# Report additonal persistence methods
+if [[ -f "/etc/init.d/trim-setup" && -x "/etc/init.d/trim-setup" ]]; then
+    echo -e "Init.d Script:        ${GREEN}Created${RESET}"
+fi
+
+if grep -q "# TRIM configuration for $DEVICE" /etc/rc.local 2>/dev/null; then
+    echo -e "RC.local Entry:       ${GREEN}Created${RESET}"
 fi
 
 # Report Timer Status
@@ -964,42 +1221,46 @@ if [ "$ENABLE_TIMER" -eq 1 ]; then
     timer_active=$(systemctl is-active fstrim.timer 2>/dev/null || echo "error")
     timer_enabled=$(systemctl is-enabled fstrim.timer 2>/dev/null || echo "error")
      if [[ "$timer_active" == "active" && "$timer_enabled" == "enabled" ]]; then
-        echo -e " Periodic TRIM Timer:   ${GREEN}Enabled & Active (Schedule: $TIMER_SCHEDULE)${RESET}"
+        echo -e "Periodic TRIM Timer:   ${GREEN}Enabled & Active (Schedule: $TIMER_SCHEDULE)${RESET}"
      elif [[ "$timer_active" == "error" || "$timer_enabled" == "error" ]]; then
-         echo -e " Periodic TRIM Timer:   ${RED}Error checking status${RESET} (Schedule: $TIMER_SCHEDULE)"
+         echo -e "Periodic TRIM Timer:   ${RED}Error checking status${RESET} (Schedule: $TIMER_SCHEDULE)"
      else
-         echo -e " Periodic TRIM Timer:   ${YELLOW}Configured (Schedule: $TIMER_SCHEDULE) - Status: $timer_active, Enabled: $timer_enabled${RESET}"
-         echo -e "                       ${YELLOW}(Verify status after reboot)${RESET}"
+         echo -e "Periodic TRIM Timer:   ${YELLOW}Configured (Schedule: $TIMER_SCHEDULE) - Status: $timer_active${RESET}"
      fi
 else
-    echo -e " Periodic TRIM Timer:   ${GRAY}Not Enabled (Use --enable-timer)${RESET}"
+    echo -e "Periodic TRIM Timer:   ${GRAY}Not Enabled (Use --enable-timer)${RESET}"
 fi
 
 # Report fstrim Test Result
-# Check logs for success/failure message from test_trim
-fstrim_test_result="N/A (Device not mounted?)"
-if grep -q "fstrim test successful on" <<< "$(log SUCCESS '')"; then
-    fstrim_test_result="${GREEN}Successful (on mounted filesystem)${RESET}"
-elif grep -q "fstrim test FAILED on" <<< "$(log ERROR '')"; then
-    fstrim_test_result="${RED}Failed (on mounted filesystem - see logs)${RESET}"
+if [[ -n "$fstrim_output" && "$fstrim_status" -eq 0 ]]; then
+    echo -e "Runtime fstrim Test:   ${GREEN}Successful${RESET}"
+elif [[ -n "$mount_points" ]]; then
+    echo -e "Runtime fstrim Test:   ${RED}Failed${RESET} (See above for details)"
+else
+    echo -e "Runtime fstrim Test:   N/A (Device not mounted)"
 fi
-echo -e " Runtime fstrim Test:   $fstrim_test_result"
-
 
 echo -e "${GRAY}==============================================${RESET}"
 echo -e "${GREEN}${BOLD}Configuration steps completed.${RESET}"
 echo
 echo -e "${RED}${BOLD}=== IMPORTANT: REBOOT REQUIRED ===${RESET}"
-echo -e "${YELLOW}A system reboot is ${BOLD}strongly recommended${RESET} to ensure the udev rules are correctly"
-echo -e "${YELLOW}applied and all system services recognize the new device configuration.${RESET}"
+echo -e "${YELLOW}A system reboot is ${BOLD}strongly recommended${RESET}${YELLOW} to ensure the udev rules are correctly"
+echo -e "applied and all system services recognize the new device configuration.${RESET}"
 echo
 echo -e "${BOLD}After Reboot Verification Steps:${RESET}"
-echo -e " 1. ${BLUE}Check runtime discard setting:${RESET} cat /sys/block/${DEVICE##*/}/queue/discard_max_bytes"
-echo -e "    (Should match calculated value: $DEVICE_DISCARD_MAX_BYTES)"
-echo -e " 2. ${BLUE}Check runtime provisioning mode:${RESET} cat /sys/block/${DEVICE##*/}/device/scsi_disk/*/provisioning_mode"
-echo -e "    (Should show 'unmap' if path exists)"
-echo -e " 3. ${BLUE}Run manual TRIM (if mounted):${RESET} sudo fstrim -v /path/to/mountpoint"
-echo -e " 4. ${BLUE}Check timer status (if enabled):${RESET} systemctl status fstrim.timer"
+echo -e "1. ${BLUE}Check runtime discard setting:${RESET}"
+echo -e "   cat /sys/block/${device_name}/queue/discard_max_bytes"
+echo -e "   (Should match calculated value: $DEVICE_DISCARD_MAX_BYTES)"
+echo
+echo -e "2. ${BLUE}Check runtime provisioning mode:${RESET}"
+echo -e "   cat /sys/block/${device_name}/device/scsi_disk/*/provisioning_mode"
+echo -e "   (Should show 'unmap' if path exists)"
+echo
+echo -e "3. ${BLUE}Run manual TRIM test:${RESET}"
+echo -e "   sudo fstrim -v /path/to/mountpoint"
+echo
+echo -e "4. ${BLUE}View init.d script status:${RESET}"
+echo -e "   sudo /etc/init.d/trim-setup status"
 echo
 
 log "INFO" "--- Trim Setup Script Finished ---"
